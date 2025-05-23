@@ -24,7 +24,7 @@ class ItemType(PyEnum):
     DEVICE_PERMANENT = "devices_permanent"          # دستگاه دائمی
     DEVICE_DISPOSABLE = "devices_disposable"        # دستگاه یکبار مصرف
     LIQUID_SALT = "liquid_salt"  # سالت نیکوتین
-    LIQUID_JUICE = "liquid_juice"                  # جویس
+    LIQUID_JUICE = "liquid_juice"    # جویس
 
 # شمارشگر برای وضعیت محتوا (نظرات، پاسخ‌ها، سوالات، پیشنهادات)
 # وضعیت‌های ممکن: در انتظار بررسی، تأیید شده، رد شده
@@ -52,6 +52,7 @@ class User(Base):
     __tablename__ = "users"
     
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # شناسه کاربر تلگرام (کلید اصلی)
+    username: Mapped[str] = mapped_column(String(30), nullable=True)  # نام کاربری (اختیاری)
     phone_number: Mapped[str] = mapped_column(String(20), nullable=True)  # شماره تلفن کاربر (اختیاری)
     status: Mapped[UserStatus] = mapped_column(Enum(UserStatus), default=UserStatus.PENDING)  # وضعیت کاربر (پیش‌فرض: در انتظار)
     rank_score: Mapped[int] = mapped_column(Integer, default=0)  # امتیاز رتبه کاربر (پیش‌فرض: 0)
@@ -121,19 +122,39 @@ class Comment(Base):
 class CommentReply(Base):
     __tablename__ = "comment_replies"
     
-    reply_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)  # شناسه پاسخ (کلید اصلی)
-    comment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("comments.comment_id", ondelete="CASCADE"), nullable=False)  # شناسه نظر (کلید خارجی)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)  # شناسه کاربر (کلید خارجی)
-    text: Mapped[str] = mapped_column(Text, nullable=False)  # متن پاسخ (الزامی)
-    media_url: Mapped[str] = mapped_column(String(255), nullable=True)  # آدرس رسانه (اختیاری)
-    status: Mapped[ContentStatus] = mapped_column(Enum(ContentStatus), default=ContentStatus.PENDING)  # وضعیت پاسخ (پیش‌فرض: در انتظار)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=datetime.utcnow)  # زمان ایجاد
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)  # زمان بروزرسانی
+    reply_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    comment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("comments.comment_id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     
-    # روابط با سایر جدول‌ها
-    comment: Mapped["Comment"] = relationship(back_populates="replies")  # رابطه با نظر
-    user: Mapped["User"] = relationship(back_populates="comment_replies")  # رابطه با کاربر
+    parent_reply_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), 
+        ForeignKey("comment_replies.reply_id", ondelete="CASCADE"), 
+        nullable=True
+    )  # پاسخ والد (در صورت وجود)
+    
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    media_url: Mapped[str] = mapped_column(String(255), nullable=True)
+    status: Mapped[ContentStatus] = mapped_column(Enum(ContentStatus), default=ContentStatus.PENDING)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # روابط
+    comment: Mapped["Comment"] = relationship(back_populates="replies")
+    user: Mapped["User"] = relationship(back_populates="comment_replies")
+
+    parent_reply: Mapped["CommentReply | None"] = relationship(
+        back_populates="child_replies",
+        remote_side="CommentReply.reply_id",
+        foreign_keys=[parent_reply_id]
+    )
+    
+    child_replies: Mapped[list["CommentReply"]] = relationship(
+        back_populates="parent_reply",
+        cascade="all, delete-orphan"
+    )
+
+ 
+    
 # جدول سوالات فنی
 # این جدول سوالات فنی کاربران را ذخیره می‌کند
 class TechQuestion(Base):

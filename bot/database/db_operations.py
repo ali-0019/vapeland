@@ -8,11 +8,12 @@ from .models import (
     QuestionRating,ItemRating, ProductSuggestion, ContactMessage, UserStatus, ItemType,
     ContentStatus, MessageStatus, TargetType
 )
-
+##############################
 # User Operations
-def create_user(db: Session, user_id: int, phone_number: str) -> User:
+##############################
+def create_user(db: Session, user_id: int) -> User:
     """Create a new user with pending status."""
-    user = User(user_id=user_id, phone_number=phone_number, status=UserStatus.PENDING)
+    user = User(user_id=user_id, status=UserStatus.VERIFIED)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -42,7 +43,29 @@ def update_user_rank_score(db: Session, user_id: int, points: int) -> Optional[U
     db.commit()
     return get_user(db, user_id)
 
+def update_user(db, user_id, username=None):
+    """Update user information in the database."""
+    update_data = {}
+    if username is not None:
+        update_data["username"] = username
+    
+    if not update_data:
+        return None
+    
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        return None
+    
+    for key, value in update_data.items():
+        setattr(user, key, value)
+    
+    db.commit()
+    return user
+
+
+##########################
 # Item Operations
+##########################
 def create_item(db: Session, type: ItemType, name: str, description: str = None) -> Item:
     """Create a new item (Device or Liquid)."""
     item = Item(type=type, name=name, description=description)
@@ -79,10 +102,19 @@ def get_item(db: Session, item_id: UUID) -> Optional[Item]:
     """Retrieve an item by item_id."""
     return db.execute(select(Item).filter_by(item_id=item_id)).scalar_one_or_none()
 
+def get_items(db: Session) -> List[Item]:
+    """Retrieve items by status with pagination."""
+    items = db.execute(
+        select(Item)
+      .order_by(Item.average_rating.desc())
+    ).scalars().all()
+    return items  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
+###################################
 # Comment Operations
+###################################
 def create_comment(db: Session, item_id: UUID, user_id: int, text: str, media_url: str = None) -> Comment:
     """Create a new comment with pending status."""
-    comment = Comment(item_id=item_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.PENDING)
+    comment = Comment(item_id=item_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.APPROVED)
     db.add(comment)
     update_user_rank_score(db, user_id, 5)  # Add 5 points for commenting
     db.commit()
@@ -102,31 +134,65 @@ def get_comments_by_item(db: Session, item_id: UUID, status: ContentStatus = Con
     return comments  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
 
 # Comment Reply Operations
-def create_comment_reply(db: Session, comment_id: UUID, user_id: int, text: str, media_url: str = None) -> CommentReply:
-    """Create a new reply to a comment with pending status."""
-    reply = CommentReply(comment_id=comment_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.PENDING)
-    db.add(reply)
-    update_user_rank_score(db, user_id, 3)  # Add 3 points for replying
+def create_comment_reply(
+    db: Session, 
+    comment_id: UUID, 
+    user_id: int, 
+    text: str, 
+    media_url: str = None, 
+    parent_reply_id: UUID = None  # برای پشتیبانی از reply to reply
+) -> CommentReply:
+    new_reply = CommentReply(
+        comment_id=comment_id,
+        user_id=user_id,
+        text=text,
+        media_url=media_url,
+        parent_reply_id=parent_reply_id,
+        status=ContentStatus.APPROVED
+    )
+    db.add(new_reply)
     db.commit()
-    db.refresh(reply)
-    return reply
+    db.refresh(new_reply)
+    return new_reply
 
-def get_comment_replies(db: Session, comment_id: UUID, status: ContentStatus = ContentStatus.APPROVED, limit: int = 5, offset: int = 0) -> List[CommentReply]:
-    """Retrieve approved replies for a comment, sorted by creation date."""
-    replies = db.execute(
-        select(CommentReply)
-        .filter_by(comment_id=comment_id, status=status)
-        .order_by(CommentReply.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    ).scalars().all()
+
+def get_comment_replies(
+    db: Session, 
+    comment_id: UUID, 
+    status: ContentStatus = ContentStatus.APPROVED, 
+    limit: int = 5, 
+    offset: int = 0
+) -> List[CommentReply]:
+    replies = db.query(CommentReply).filter(
+        CommentReply.comment_id == comment_id,
+        CommentReply.status == status,
+        CommentReply.parent_reply_id == None  # فقط پاسخ‌های سطح اول
+    ).order_by(CommentReply.created_at.asc()).offset(offset).limit(limit).all()
     
-    return replies  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
+    return replies
 
+# تابع جدید برای دریافت پاسخ‌های یک پاسخ
+def get_reply_replies(
+    db: Session, 
+    reply_id: UUID, 
+    status: ContentStatus = ContentStatus.APPROVED, 
+    limit: int = 5, 
+    offset: int = 0
+) -> List[CommentReply]:
+    replies = db.query(CommentReply).filter(
+        CommentReply.parent_reply_id == reply_id,
+        CommentReply.status == status
+    ).order_by(CommentReply.created_at.asc()).offset(offset).limit(limit).all()
+    
+    return replies
+
+
+##########################################
 # Technical Question Operations
+##########################################
 def create_tech_question(db: Session, user_id: int, text: str, media_url: str = None) -> TechQuestion:
     """Create a new technical question with pending status."""
-    question = TechQuestion(user_id=user_id, text=text, media_url=media_url, status=ContentStatus.PENDING)
+    question = TechQuestion(user_id=user_id, text=text, media_url=media_url, status=ContentStatus.APPROVED)
     db.add(question)
     update_user_rank_score(db, user_id, 10)  # Add 10 points for question
     db.commit()
@@ -152,7 +218,7 @@ def get_tech_question(db: Session, question_id: UUID) -> Optional[TechQuestion]:
 # Question Reply Operations
 def create_question_reply(db: Session, question_id: UUID, user_id: int, text: str, media_url: str = None) -> QuestionReply:
     """Create a new reply to a technical question with pending status."""
-    reply = QuestionReply(question_id=question_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.PENDING)
+    reply = QuestionReply(question_id=question_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.APPROVED)
     db.add(reply)
     update_user_rank_score(db, user_id, 3)  # Add 3 points for replying
     db.commit()
@@ -170,7 +236,10 @@ def get_question_replies(db: Session, question_id: UUID, status: ContentStatus =
     ).scalars().all()
     
     return replies  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
+
+##################################
 # Rating Operations
+##################################
 def create_item_rating(db: Session, user_id: int, item_id: UUID, score: int) -> Optional[ItemRating]:
     """Create a new rating for an item."""
     existing_rating = db.execute(
@@ -231,7 +300,9 @@ def create_question_rating(db: Session, user_id: int, question_id: UUID, score: 
     db.refresh(rating)
     return rating
 
+#######################################
 # Product Suggestion Operations
+#######################################
 def create_product_suggestion(db: Session, user_id: int, name: str, description: str, media_url: str = None) -> ProductSuggestion:
     """Create a new product suggestion with pending status."""
     suggestion = ProductSuggestion(user_id=user_id, name=name, description=description, media_url=media_url, status=ContentStatus.PENDING)
@@ -253,7 +324,10 @@ def get_product_suggestions(db: Session, status: ContentStatus = ContentStatus.P
     
     return suggestions  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
 
+
+#######################################
 # Contact Message Operations
+#######################################
 def create_contact_message(db: Session, user_id: int, text: str, media_url: str = None) -> ContactMessage:
     """Create a new contact message with pending status."""
     message = ContactMessage(user_id=user_id, text=text, media_url=media_url, status=MessageStatus.PENDING)
