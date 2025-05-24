@@ -99,7 +99,6 @@ async def search_cancel_callback(update: Update, context: CallbackContext) -> in
         reply_markup=create_main_menu_buttons()
     )
     return ConversationHandler.END
-
 # Register search callback handlers
 def register_search_callback_handlers(application: Application) -> None:
     """Register search callback handlers."""
