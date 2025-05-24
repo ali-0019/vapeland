@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import CallbackContext, ConversationHandler, CallbackQueryHandler, MessageHandler , filters
+from telegram.ext import CallbackContext, ConversationHandler, CallbackQueryHandler, MessageHandler , filters ,CommandHandler
 from typing import Dict, Any, List, Optional, Tuple
 from uuid import UUID
 from datetime import datetime
@@ -9,9 +9,10 @@ from database.db_operations import (
     get_items_by_type, get_item, get_comments_by_item, get_comment_replies,
     create_item_rating, 
     get_user, create_item, create_comment, create_comment_reply,
-    create_item_rating
+    create_item_rating , count_direct_replies_to_comment, count_sub_replies,get_reply_replies
 )
-from database.models import ItemType, ContentStatus, TargetType
+from database.models import ItemType, ContentStatus, TargetType , CommentReply , Comment
+
 from utils.buttons import (
     create_main_menu_buttons,
     create_cancel_button,
@@ -19,12 +20,12 @@ from utils.buttons import (
 from utils.items.item_buttons import (
     create_device_category_buttons,create_liquid_category_buttons,
     create_item_list_buttons,create_item_detail_buttons,
-    create_comment_buttons,create_reply_comment_buttons
+    create_comment_buttons
 )
 from utils.callback_handlers import (
     cancel_callback
 )
-COMMENT, REPLY = range(2)
+NAME,DESCRIPTION,COMMENT, REPLY ,REPLY_AWAITING_CONTENT = range(5)
 
 ####################################
 
@@ -295,7 +296,6 @@ async def item_comments_callback(update: Update, context: CallbackContext) -> No
     try:
         # Extract item ID from callback data
         _, item_id = query.data.split("_", 1)
-        
         # Get item details
         db = next(get_db())
         
@@ -335,7 +335,6 @@ async def item_comments_callback(update: Update, context: CallbackContext) -> No
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
-        
         # نمایش هر نظر در یک پیام جداگانه (حداکثر ۵ نظر)
         for i, comment in enumerate(comments[:5], 1):
             user = get_user(db, comment.user_id)
@@ -365,10 +364,13 @@ async def item_comments_callback(update: Update, context: CallbackContext) -> No
         
         # پیام نهایی با دکمه‌های اصلی
         final_keyboard = []
-        
+        # Save total comments count to user data
+        context.user_data["total_comments"] = i
         # اگر نظرات بیشتر از ۵ تا بود
+        
         if len(comments) > 5:
-            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {len(comments) - 5} نظر دیگر", callback_data=f"more_comments_{item_id}_5")])
+            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {(len(comments) - context.user_data['total_comments'])%5} نظر دیگر",
+                                                        callback_data=f"more_comments_{item_id}")])
         
         # دکمه‌های اصلی
         final_keyboard.append([InlineKeyboardButton("💬 افزودن نظر", callback_data=f"comment_item_{item_id}")])
@@ -400,8 +402,7 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
     
     try:
         # Extract item ID and offset from callback data
-        _, item_id, offset = query.data.split("_", 2)
-        offset = int(offset)
+        _,_, item_id = query.data.split("_", 2)
         
         # Get item details
         db = next(get_db())
@@ -426,7 +427,7 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
         comments = get_comments_by_item(db, item.item_id, ContentStatus.APPROVED)
         
         # اگر نظری وجود نداشت یا آفست بیشتر از تعداد نظرات بود
-        if not comments or offset >= len(comments):
+        if not comments or context.user_data['total_comments'] >= len(comments):
             await query.edit_message_text(
                 "نظر بیشتری وجود ندارد.",
                 reply_markup=InlineKeyboardMarkup([
@@ -436,10 +437,8 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
             return
         
         # تعداد نظرات باقیمانده
-        remaining_comments = comments[offset:]
-        
-        # تعداد نظراتی که نمایش داده می‌شوند (حداکثر ۵ نظر)
-        display_count = min(5, len(remaining_comments))
+        remaining_comments = (len(comments) - context.user_data['total_comments']) % 5
+        remaining_comments += context.user_data['total_comments']
         
         # ابتدا پیام اصلی را به‌روزرسانی می‌کنیم
         await query.edit_message_text(
@@ -450,7 +449,8 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
         )
         
         # نمایش هر نظر در یک پیام جداگانه
-        for i, comment in enumerate(remaining_comments[:display_count], offset + 1):
+        for i, comment in enumerate(comments[context.user_data['total_comments']:remaining_comments], context.user_data['total_comments']):
+            remaining_comments += 1
             user = get_user(db, comment.user_id)
             username = user.username if user and user.username else f"کاربر {comment.user_id}"
             
@@ -468,24 +468,24 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
                 comment_text += f"\n↩️ {reply_count} پاسخ\n"
             
             # دکمه‌های هر نظر
-            comment_keyboard = [
-                [InlineKeyboardButton("↩️ پاسخ به این نظر", callback_data=f"reply_{comment.comment_id}")]
-            ]
+            comment_keyboard = create_comment_buttons(str(comment.comment_id), has_replies=bool(reply_count))
+            
             
             # ارسال پیام نظر
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=comment_text,
-                reply_markup=InlineKeyboardMarkup(comment_keyboard)
+                reply_markup=comment_keyboard
             )
         
         # پیام نهایی با دکمه‌های اصلی
         final_keyboard = []
-        
+        context.user_data['total_comments'] = remaining_comments
         # اگر نظرات بیشتری باقی مانده بود
-        new_offset = offset + display_count
-        if new_offset < len(comments):
-            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {len(comments) - new_offset} نظر دیگر", callback_data=f"more_comments_{item_id}_{new_offset}")])
+
+        if remaining_comments < len(comments):
+            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {(len(comments) - context.user_data['total_comments'])%5} نظر دیگر",
+                                                        callback_data=f"more_comments_{item_id}")])
         
         # دکمه‌های اصلی
         final_keyboard.append([InlineKeyboardButton("💬 افزودن نظر", callback_data=f"comment_item_{item_id}")])
@@ -507,110 +507,6 @@ async def more_comments_callback(update: Update, context: CallbackContext) -> No
             f"خطایی رخ داد. لطفاً دوباره تلاش کنید.\n{e}",
             reply_markup=create_main_menu_buttons()
         )
-
-# View single comment callback handler
-async def view_comment_callback(update: Update, context: CallbackContext) -> None:
-    """Handle viewing a single comment."""
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # Extract item ID and comment index from callback data
-        _, item_id, comment_index = query.data.split("_", 2)
-        comment_index = int(comment_index)
-        
-        # Get item details
-        db = next(get_db())
-        
-        try:
-            item = get_item(db, item_id)
-        except ValueError:
-            await query.edit_message_text(
-                "شناسه محصول نامعتبر است. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return
-        
-        if not item:
-            await query.edit_message_text(
-                "محصول مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return
-        
-        # Get approved comments for the item
-        comments = get_comments_by_item(db, item.item_id, ContentStatus.APPROVED)
-        
-        if not comments:
-            await query.edit_message_text(
-                f"هنوز نظری برای {item.name} ثبت نشده است.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💬 افزودن نظر", callback_data=f"comment_item_{item_id}")],
-                    [InlineKeyboardButton("🔙 بازگشت به جزئیات محصول", callback_data=f"item_{context.user_data.get('current_category', 'unknown')}_{item_id}")]
-                ])
-            )
-            return
-        
-        # Check if comment index is valid
-        if comment_index < 0 or comment_index >= len(comments):
-            comment_index = 0
-        
-        # Get the current comment
-        comment = comments[comment_index]
-        # Get user details
-        user = get_user(db, comment.user_id)
-        username = user.username if user and user.username else f"کاربر {comment.user_id}"  
-        # Format comment details
-        comment_text = f"💬 نظر {comment_index + 1} از {len(comments)} برای {item.name}:\n\n"
-        comment_text += f"👤{username}:\n{comment.text}\n"
-        
-        # Check if comment has media
-        if comment.media_url:
-            comment_text += "\n🖼️ [دارای تصویر یا ویدیو]\n"
-        
-        # Get replies for this comment
-        replies = get_comment_replies(db, comment.comment_id, ContentStatus.APPROVED)
-        if replies:
-            comment_text += f"\n↩️ پاسخ‌ها ({len(replies)}):\n"
-            for i, reply in enumerate(replies[:3], 1):
-                reply_user = get_user(db, reply.user_id)
-                comment_text += f"{i}. {reply.text}\n"
-        
-            if len(replies) > 3:
-                comment_text += f"... و {len(replies) - 3} پاسخ دیگر\n"
-        
-        # Create navigation buttons
-        keyboard = []
-        
-        # Navigation row
-        nav_row = []
-        if comment_index > 0:
-            nav_row.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"viewcomment_{item_id}_{comment_index - 1}"))
-        
-        if comment_index < len(comments) - 1:
-            nav_row.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"viewcomment_{item_id}_{comment_index + 1}"))
-        
-        if nav_row:
-            keyboard.append(nav_row)
-        
-        # Action buttons
-        keyboard.append([InlineKeyboardButton("↩️ پاسخ به این نظر", callback_data=f"reply_comment_{comment.comment_id}")])
-        keyboard.append([InlineKeyboardButton("💬 همه نظرات", callback_data=f"comments_{item_id}")])
-        keyboard.append([InlineKeyboardButton("🔙 بازگشت به جزئیات محصول", callback_data=f"item_{context.user_data.get('current_category', 'unknown')}_{item_id}")])
-        
-        await query.edit_message_text(
-            comment_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    except Exception as e:
-        # Handle any other exceptions
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in view_comment_callback: {str(e)}")
-        logger.exception("Full traceback:")
-        await query.edit_message_text(
-            f"خطایی رخ داد. لطفاً دوباره تلاش کنید.\n{e}",
-            reply_markup=create_main_menu_buttons()
-        ) 
 
 
 ###################################
@@ -816,66 +712,6 @@ async def handle_comment_video(update: Update, context: CallbackContext) -> int:
     # End the conversation
     return ConversationHandler.END
 
-# Show more comments callback handler
-async def more_comments_callback(update: Update, context: CallbackContext) -> None:
-    """Show more comments for an item or question."""
-    query = update.callback_query
-    await query.answer()
-    
-    # Extract target type and ID from callback data
-    _, target_type, target_id = query.data.split("_", 2)
-    
-    # Get comments
-    db = next(get_db())
-    
-    if target_type == "item":
-        comments = get_comments_by_item(db, UUID(target_id), ContentStatus.APPROVED, limit=10)
-        item = get_item(db, UUID(target_id))
-        title = f"نظرات کاربران برای {item.name}" if item else "نظرات کاربران"
-    elif target_type == "question":
-        comments = get_question_replies(db, UUID(target_id), ContentStatus.APPROVED, limit=10)
-        question = get_tech_question(db, UUID(target_id))
-        title = "پاسخ‌های کاربران به سوال" if question else "پاسخ‌های کاربران"
-    else:
-        await query.edit_message_text(
-            "نوع هدف نامعتبر است.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return
-    
-    # Format comments
-    comments_text = f"{title}:\n\n"
-    if comments:
-        for i, comment in enumerate(comments, 1):
-            user = get_user(db, comment.user_id)
-            username = user.username if user and user.username else f"کاربر {comment.user_id}"
-            comments_text += f"{i}. {username}: {comment.text}\n"
-            
-            # Check if comment has media
-            if comment.media_url:
-                comments_text += "🖼️ [دارای تصویر یا ویدیو]\n"
-            
-            # Add reply count if any
-            if target_type == "item":
-                reply_count = len(get_comment_replies(db, comment.comment_id, ContentStatus.APPROVED))
-                if reply_count > 0:
-                    comments_text += f"↩️ {reply_count} پاسخ\n"
-            
-            comments_text += "\n"
-    else:
-        comments_text += "هنوز نظری ثبت نشده است."
-    
-    # Create back button
-    if target_type == "item":
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت به جزئیات محصول", callback_data=f"item_{context.user_data.get('current_category', 'unknown')}_{target_id}")]]
-    else:
-        keyboard = [[InlineKeyboardButton("🔙 بازگشت به جزئیات سوال", callback_data=f"question_{target_id}")]]
-    
-    await query.edit_message_text(
-        comments_text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
 ###########################################################
 
 # Reply to comment callback handler - start conversation
@@ -888,728 +724,305 @@ async def reply_comment_callback(update: Update, context: CallbackContext) -> in
     await query.answer(show_alert=False)
     
     # Extract comment ID from callback data
-    _,_, comment_id = query.data.split("_", 2)
-    
-    # Save comment ID in user data
-    context.user_data["reply_comment_id"] = comment_id
+    try:
+        _, _, comment_id_str = query.data.split("_", 2)
+        UUID(comment_id_str) # Validate UUID format
+    except (ValueError, IndexError):
+        logger.error(f"Invalid callback data for reply_comment_callback: {query.data}")
+        await query.edit_message_text("خطا: اطلاعات نامعتبر برای پاسخ به نظر.")
+        return ConversationHandler.END
+        
+    context.user_data["current_reply_root_comment_id"] = comment_id_str
+    context.user_data["current_reply_parent_reply_id"] = None  # Replying to the main comment directly
     
     await context.bot.send_message(
-        text= "لطفاً پاسخ خود را بنویسید. می‌توانید متن، عکس یا ویدیو ارسال کنید (حداکثر حجم: 10MB).",
         chat_id=update.effective_chat.id,
+        text="لطفاً پاسخ خود را برای نظر اصلی بنویسید. (متن، عکس، ویدیو - حداکثر 10MB).",
         reply_markup=create_cancel_button()
     )
-    
     return REPLY
+
+# Start conversation to reply to ANOTHER REPLY
+async def init_reply_to_reply_callback(update: Update, context: CallbackContext) -> int:
+    """Start conversation to reply to another reply."""
+    query = update.callback_query
+    await query.answer(show_alert=False)
+    
+    # Callback data format: "init_reply_to_reply_{root_comment_id}_{parent_reply_id}"
+    try:
+        parts = query.data.split("_")
+        # Assuming callback data: "rtr_{root_comment_id}_{parent_reply_id}"
+        # This parsing needs to be robust based on your actual callback data string
+        action_prefix,parent_reply_id_str = query.data.split("_", 1)
+        if action_prefix != "rtr": # Reply To Reply
+            raise ValueError("Invalid action prefix for reply to reply")
+
+        UUID(parent_reply_id_str)
+    except (ValueError, IndexError):
+        logging.error(f"Invalid callback data for init_reply_to_reply_callback: {query.data}")
+        await query.edit_message_text("خطا: اطلاعات نامعتبر برای پاسخ به پاسخ.")
+        return ConversationHandler.END
+        
+    context.user_data["current_reply_parent_reply_id"] = parent_reply_id_str
+    
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="شما در حال پاسخ به یک پاسخ دیگر هستید. لطفاً پاسخ خود را بنویسید. (متن، عکس، ویدیو - حداکثر 10MB).",
+        reply_markup=create_cancel_button()
+    )
+    return REPLY
+
+# Internal helper to process reply submission
+async def _process_reply_submission(update: Update, context: CallbackContext, text: str, media_url: str | None = None) -> int:
+    user_id = update.effective_user.id
+    
+    root_comment_id_str = context.user_data.get("current_reply_root_comment_id")
+    # parent_reply_id_str can be None if replying to a main comment
+    parent_reply_id_str = context.user_data.get("current_reply_parent_reply_id") 
+
+    if not root_comment_id_str:
+        await update.message.reply_text(
+            "خطا در شناسایی نظر اصلی. لطفاً دوباره تلاش کنید.",
+            reply_markup=create_main_menu_buttons()
+        )
+        return ConversationHandler.END
+
+    try:
+        db = next(get_db()) # Ensure get_db() is properly managed (e.g., contextmanager)
+
+        root_comment_id_uuid = context.user_data.get("current_reply_root_comment_id")
+        parent_reply_id_uuid = context.user_data.get("current_reply_parent_reply_id")
+
+        # Call your existing CRUD function for creating a reply
+        reply = create_comment_reply(
+            db=db,
+            comment_id=root_comment_id_uuid,    # This is the root_comment_id
+            user_id=user_id,
+            text=text,
+            media_url=media_url,
+            parent_reply_id=parent_reply_id_uuid # This will be None or the UUID of the parent CommentReply
+        )
+        # The CRUD function `create_comment_reply` already sets status to APPROVED.
+        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
+        await update.message.reply_text(success_message, reply_markup=create_main_menu_buttons())
+
+    except ValueError:
+        logging.error(f"Invalid UUID format provided: root='{root_comment_id_str}', parent='{parent_reply_id_str}'")
+        await update.message.reply_text("خطا در قالب شناسه. لطفاً دوباره تلاش کنید.", reply_markup=create_main_menu_buttons())
+    except Exception as e:
+        logging.exception(f"Error creating reply submission (user: {user_id}): {e}") # Use logger.exception for traceback
+        await update.message.reply_text("خطا در ثبت پاسخ. لطفاً دوباره تلاش کنید.", reply_markup=create_main_menu_buttons())
+    return ConversationHandler.END
 
 # Handle text replies
 async def handle_reply_text(update: Update, context: CallbackContext) -> int:
-    """Handle text replies."""
-    user_id = update.effective_user.id
     text = update.message.text
-
-    # Get comment ID from user data
-    comment_id = context.user_data.get("reply_comment_id")
-
-    if not comment_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    try:
-        db = next(get_db())
-
-        # Create reply
-        reply = create_comment_reply(db, UUID(comment_id), user_id, text)
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons() 
-        )
-
-    except Exception as e:
-        # Log the error
-        logger.error(f"Error creating reply: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
+    return await _process_reply_submission(update, context, text=text, media_url=None)
 
 # Handle media replies (photo)
 async def handle_reply_photo(update: Update, context: CallbackContext) -> int:
-    """Handle photo replies."""
-    user_id = update.effective_user.id
-    photo = update.message.photo[-1]  # Get the largest photo
+    user_id = update.effective_user.id # For filename
+    photo = update.message.photo[-1]
     text = update.message.caption or ""
 
-    # Get comment ID from user data
-    comment_id = context.user_data.get("reply_comment_id")
-
-    if not comment_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    # Check photo size (10MB limit)
-    if photo.file_size > 10 * 1024 * 1024:  # 10MB in bytes
-        await update.message.reply_text(
-            "حجم عکس بیشتر از 10 مگابایت است. لطفاً عکس کوچکتری ارسال کنید.",
-            reply_markup=create_cancel_button()
-        )
-        return REPLY
-
+    if photo.file_size > 10 * 1024 * 1024:  # 10MB
+        await update.message.reply_text("حجم عکس بیشتر از 10 مگابایت است.", reply_markup=create_cancel_button())
+        return REPLY # Stay in REPLY state
     try:
-        # Get photo file
         photo_file = await photo.get_file()
-
-        # Generate a unique filename
-        file_extension = "jpg"
-        filename = f"reply_{user_id}_{int(datetime.now().timestamp())}.{file_extension}"
-        # Save the photo to a directory (you need to implement this)
-        # For example: media_url = await save_media_file(photo_file, filename)
-        media_url = f"media/replies/{filename}"  # This is just a placeholder
-
-        db = next(get_db())
-
-        # Create reply with media
-        reply = create_comment_reply(db, UUID(comment_id), user_id, text, media_url)
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons()
-        )
-
+        # TODO: Implement actual file saving logic (async if possible)
+        # media_url = await save_media_file(photo_file, f"reply_photo_{user_id}_{int(datetime.now().timestamp())}.jpg")
+        media_url_placeholder = f"media/replies/photos/reply_photo_{user_id}_{int(datetime.now().timestamp())}.jpg" # Placeholder
+        return await _process_reply_submission(update, context, text=text, media_url=media_url_placeholder)
     except Exception as e:
-        # Log the error
-        logger.error(f"Error creating reply with photo: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
+        logger.exception(f"Error processing/saving photo reply for user {user_id}: {e}")
+        await update.message.reply_text("خطا در پردازش عکس. لطفاً دوباره تلاش کنید.", reply_markup=create_main_menu_buttons())
+        context.user_data.pop("current_reply_root_comment_id", None) # Clean up state on error too
+        context.user_data.pop("current_reply_parent_reply_id", None)
+        return ConversationHandler.END
 
 # Handle media replies (video)
 async def handle_reply_video(update: Update, context: CallbackContext) -> int:
-    """Handle video replies."""
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id # For filename
     video = update.message.video
     text = update.message.caption or ""
 
-    # Get comment ID from user data
-    comment_id = context.user_data.get("reply_comment_id")
-
-    if not comment_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    # Check video size (10MB limit)
-    if video.file_size > 10 * 1024 * 1024:  # 10MB in bytes
-        await update.message.reply_text(
-            "حجم ویدیو بیشتر از 10 مگابایت است. لطفاً ویدیو کوچکتری ارسال کنید.",
-            reply_markup=create_cancel_button()
-        )
-        return REPLY
+    if video.file_size > 10 * 1024 * 1024:  # 10MB
+        await update.message.reply_text("حجم ویدیو بیشتر از 10 مگابایت است.", reply_markup=create_cancel_button())
+        return REPLY # Stay in REPLY state
 
     try:
-        # Get video file
         video_file = await video.get_file()
-
-        # Generate a unique filename
-        file_extension = "mp4"
-        filename = f"reply_{user_id}_{int(datetime.now().timestamp())}.{file_extension}"
-        # Save the video to a directory (you need to implement this)
-        # For example: media_url = await save_media_file(video_file, filename)
-        media_url = f"media/replies/{filename}"  # This is just a placeholder
-
-        db = next(get_db())
-
-        # Create reply with media
-        reply = create_comment_reply(db, UUID(comment_id), user_id, text, media_url)
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons()
-        )
-
+        # TODO: Implement actual file saving logic (async if possible)
+        # media_url = await save_media_file(video_file, f"reply_video_{user_id}_{int(datetime.now().timestamp())}.mp4")
+        media_url_placeholder = f"media/replies/videos/reply_video_{user_id}_{int(datetime.now().timestamp())}.mp4" # Placeholder
+        return await _process_reply_submission(update, context, text=text, media_url=media_url_placeholder)
     except Exception as e:
-        # Log the error
-        logger.error(f"Error creating reply with video: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
+        logger.exception(f"Error processing/saving video reply for user {user_id}: {e}")
+        await update.message.reply_text("خطا در پردازش ویدیو. لطفاً دوباره تلاش کنید.", reply_markup=create_main_menu_buttons())
+        context.user_data.pop("current_reply_root_comment_id", None)
+        context.user_data.pop("current_reply_parent_reply_id", None)
+        return ConversationHandler.END
 
 # Cancel reply conversation handler
-async def cancel_reply(update: Update, context: CallbackContext) -> int:
-    """Cancel reply conversation."""
-    await update.message.reply_text(
-        "پاسخ به نظر لغو شد.",
-        reply_markup=create_main_menu_buttons()
-    )
+async def cancel_reply_conversation(update: Update, context: CallbackContext) -> int:
+    """Cancels the current reply conversation."""
+    # Determine if it's a callback query or a message
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("عملیات پاسخ لغو شد.", reply_markup=create_main_menu_buttons())
+    elif update.message:
+        await update.message.reply_text("عملیات پاسخ لغو شد.", reply_markup=create_main_menu_buttons())
+    
+    context.user_data.pop("current_reply_root_comment_id", None)
+    context.user_data.pop("current_reply_parent_reply_id", None)
     return ConversationHandler.END
 
-# Show replies callback handler
-async def show_replies_callback(update: Update, context: CallbackContext) -> None:
-    """Handle showing replies to a comment."""
+# Show replies (generalized for root comment or sub-replies)
+async def show_replies_or_sub_replies_callback(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     await query.answer()
+
+    # Callback data format: "show_replies_{root_comment_id}_{parent_id_str}_{offset_str}"
+    # parent_id_str can be "ROOT" or a UUID of the parent reply.
+    try:
+        parts = query.data.split("_")
+        action = parts[0] + "_" + parts[1] # "show_replies"
+        logging.info(f"parts: {query.data}")
+        if action != "show_replies" or len(parts) < 5: #  show_replies_rootcommentid_parentid_offset
+            raise ValueError("Invalid callback data format")
+            
+        root_comment_id_str = parts[2] # ROOT or UUID string
+        context.user_data["current_reply_root_comment_id"] = root_comment_id_str
+        parent_id_str = parts[3]  # "ROOT" or UUID string
+        offset = int(parts[4])
+        limit = 3 # Display fewer replies per message for clarity in a tree
+
+        if root_comment_id_str != "ROOT":
+            UUID(root_comment_id_str) # Validate root_comment_id
+        if parent_id_str != "ROOT":
+            UUID(parent_id_str) # Validate parent_id if it's not ROOT
+
+    except (ValueError, IndexError) as e:
+        logging.error(f"Invalid callback data for show_replies: {query.data}, error: {e}")
+        await query.edit_message_text("خطا: اطلاعات نامعتبر برای نمایش پاسخ‌ها.")
+        return
+
+    db = next(get_db())
+    current_replies_list: List[CommentReply] = []
+    total_at_this_level: int = 0
+    header_message = ""
     
-    try:
-        # Extract comment ID and offset from callback data
-        _,_, comment_id = query.data.split("_", 2)
+    root_comment_uuid = UUID(root_comment_id_str) if not "ROOT" else context.user_data.get("current_reply_root_comment_id")
+
+    # Fetching data based on whether it's for root comment or a sub-reply
+    if parent_id_str == "ROOT":
+        # TODO: Fetch the main comment's text to show as header if desired
+        # main_comment = db.query(Comment).filter(Comment.comment_id == root_comment_uuid).first()
+        # if main_comment: header_message = f"پاسخ‌ها به نظر: \"{main_comment.text[:30]}...\"\n\n"
+        # else: header_message = "پاسخ‌ها به نظر اصلی:\n\n"
+        header_message = "پاسخ‌ها به نظر اصلی:\n\n"
+        current_replies_list = get_comment_replies(db, root_comment_uuid, ContentStatus.APPROVED)
+        total_at_this_level = count_direct_replies_to_comment(db, root_comment_uuid, ContentStatus.APPROVED)
+    else:
+        parent_reply_uuid = UUID(parent_id_str)
+        # TODO: Fetch the parent reply's text to show as header if desired
+        # parent_reply_for_header = db.query(CommentReply).filter(CommentReply.reply_id == parent_reply_uuid).first()
+        # if parent_reply_for_header: header_message = f"پاسخ‌های داخلی به: \"{parent_reply_for_header.text[:30]}...\"\n\n"
+        # else: header_message = f"پاسخ‌های داخلی:\n\n"
+        header_message = "پاسخ‌های داخلی:\n\n"
+        current_replies_list = get_reply_replies(db, parent_reply_uuid, ContentStatus.APPROVED)
+        total_at_this_level = count_sub_replies(db, parent_reply_uuid, ContentStatus.APPROVED)
+
+    if not current_replies_list and offset == 0:
+        no_replies_text = header_message + "هیچ پاسخی در این سطح ثبت نشده است."
+        # Simplified back button logic for now
+        back_button_cb = f"show_comments_for_item_{root_comment_id_str}" # Needs item_id, or back to comment
+        if parent_id_str != "ROOT": # If viewing sub-replies, back goes to parent's replies (or root comment replies)
+             # This needs the parent of the current parent_id_str or the root_comment_id
+             # For simplicity, back to root replies of the original comment
+             # Needs a way to get the original comment if we only have parent_reply_uuid
+             original_comment_of_thread = db.execute(select(CommentReply.comment_id).where(CommentReply.reply_id == parent_reply_uuid)).scalar_one_or_none() if parent_id_str != "ROOT" else root_comment_uuid
+             if original_comment_of_thread:
+                back_button_cb = f"show_replies_{str(original_comment_of_thread)}_ROOT_0"
+
+        await query.edit_message_text(no_replies_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data=back_button_cb)]]))
+        return
+
+    # To avoid hitting message limits, send header, then each reply, then pagination.
+    # Editing the original message might be too complex if many replies.
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=header_message)
+
+    for reply in current_replies_list:
+        user = get_user(db, reply.user_id) # Assume get_user exists
+        username = user.username if user and user.username else f"کاربر گمنام ({reply.user_id % 1000})" # Avoid showing full ID
         
-        # Get comment details
-        db = next(get_db())
+        reply_display_text = f"👤 {username}:\n{reply.text}"
+        if reply.media_url:
+            reply_display_text += f"\n🖼️ [رسانه]" # You might want to send media directly if it's just one
+
+        buttons_for_this_reply_row = []
+        # Button to reply to *this* reply (passes root_comment_id and this reply.reply_id as parent)
+        buttons_for_this_reply_row.append(
+            [InlineKeyboardButton(f"↪️ پاسخ به این", callback_data=f"rtr_{reply.reply_id}")]
+        )
         
-        # Get approved replies for the comment
-        replies = get_comment_replies(db, comment_id, ContentStatus.APPROVED)
-        
-        # اگر پاسخی وجود نداشت یا آفست بیشتر از تعداد پاسخ‌ها بود
-        if not replies :
-            await query.edit_message_text(
-                "پاسخ بیشتری وجود ندارد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_comments")]
-                ])
+        num_sub_replies = count_sub_replies(db, reply.reply_id, ContentStatus.APPROVED)
+        if num_sub_replies > 0:
+            buttons_for_this_reply_row.append(
+                [InlineKeyboardButton(f"👁️ {num_sub_replies} پاسخ داخلی", callback_data=f"show_replies_ROOT_{reply.reply_id}_0")]
             )
-            return
-    
-        # ابتدا پیام اصلی را به‌روزرسانی می‌کنیم
-        await context.bot.send_message(
-            text = f"پاسخ‌های نظر:",
-            chat_id=update.effective_chat.id,
-        )
-        
-        # نمایش هر نظر در یک پیام جداگانه (حداکثر ۵ نظر)
-        for i, reply in enumerate(replies[:5], 1):
-            user = get_user(db, reply.user_id)
-            username = user.username if user and user.username else f"کاربر {reply.user_id}"
-            # متن نظر
-            comment_text = f"💬 نظر #{i}:\n\n"
-            comment_text += f"👤 {username}:\n{reply.text}\n"
-            
-            # اگر رسانه داشت
-            if reply.media_url:
-                comment_text += "\n🖼️ [دارای تصویر یا ویدیو]\n"
-            
-            # تعداد پاسخ‌ها
-            reply_count = len(get_comment_replies(db, reply.reply_id, ContentStatus.APPROVED))
-            if reply_count > 0:
-                comment_text += f"\n↩️ {reply_count} پاسخ\n"
-            
-            # دکمه‌های هر نظر
-            comment_keyboard = create_reply_comment_buttons(str(reply.reply_id), has_replies=bool(reply_count))
-            
-            # ارسال پیام نظر
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=comment_text,
-                reply_markup=comment_keyboard
-            )
-        
-        # پیام نهایی با دکمه‌های اصلی
-        final_keyboard = []
-        
-        if 5 < len(replies):
-            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {len(replies) - 5} پاسخ دیگر", callback_data=f"show_replies_{comment_id}_{5}")])
-        
-        # دکمه‌های اصلی
-        final_keyboard.append([InlineKeyboardButton("💬 افزودن پاسخ", callback_data=f"reply_{comment_id}")])
-        final_keyboard.append([InlineKeyboardButton("🔙 بازگشت به نظرات", callback_data="back_to_comments")])
-        
-        # ارسال پیام نهایی
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="برای ادامه یکی از گزینه‌های زیر را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(final_keyboard)
-        )
-        
-    except Exception as e:
-        # Handle any other exceptions
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in show_replies_callback: {str(e)}")
-        logger.exception("Full traceback:")
-        await query.edit_message_text(
-            f"خطایی رخ داد. لطفاً دوباره تلاش کنید.\n{e}",
-            reply_markup=create_main_menu_buttons()
-        )
-#########################################
-#
-########################################
-async def reply_to_reply_callback(update: Update, context: CallbackContext) -> int:
-    """Start conversation to reply to a reply."""
-    query = update.callback_query
-    await query.answer(show_alert=False)
-
-    # Extract reply ID from callback data
-    _,_,_, reply_id = query.data.split("_", 3)
-
-    # Save reply ID in user data
-    context.user_data["reply_to_reply_id"] = reply_id
-
-    await context.bot.send_message(
-        text="لطفاً پاسخ خود را بنویسید. می‌توانید متن، عکس یا ویدیو ارسال کنید (حداکثر حجم: 10MB).",
-        chat_id=update.effective_chat.id,
-        reply_markup=create_cancel_button()
-    )
-    return REPLY
-
-# Handle text replies to a reply
-async def handle_reply_to_reply_text(update: Update, context: CallbackContext) -> int:
-    """Handle text replies to a reply."""
-    user_id = update.effective_user.id
-    text = update.message.text
-
-    # Get reply ID from user data
-    reply_id = context.user_data.get("reply_to_reply_id")
-
-    if not reply_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    try:
-        db = next(get_db())
-        
-        # دریافت اطلاعات پاسخ والد
-        parent_reply = db.query(CommentReply).filter(CommentReply.reply_id == UUID(reply_id)).first()
-        if not parent_reply:
-            await update.message.reply_text(
-                "پاسخ مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return ConversationHandler.END
-            
-        # Create reply
-        reply = create_comment_reply(
-            db=db, 
-            comment_id=parent_reply.comment_id,  # استفاده از comment_id پاسخ والد
-            user_id=user_id, 
-            text=text,
-            parent_reply_id=UUID(reply_id)  # تنظیم parent_reply_id
-        )
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons()
-        )
-
-    except Exception as e: 
-        # Log the error
-        logger.error(f"Error creating reply to reply: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
-
-# Handle photo replies to a reply
-async def handle_reply_to_reply_photo(update: Update, context: CallbackContext) -> int:
-    """Handle photo replies to a reply."""
-    user_id = update.effective_user.id
-    photo = update.message.photo[-1]  # Get the largest photo
-    text = update.message.caption or ""
-
-    # Get reply ID from user data
-    reply_id = context.user_data.get("reply_to_reply_id")
-
-    if not reply_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    # Check photo size (10MB limit)
-    if photo.file_size > 10 * 1024 * 1024:  # 10MB in bytes
-        await update.message.reply_text(
-            "حجم عکس بیشتر از 10 مگابایت است. لطفاً عکس کوچکتری ارسال کنید.",
-            reply_markup=create_cancel_button()
-        )
-        return REPLY
-    try:
-        # Get photo file
-        photo_file = await photo.get_file()
-
-        # Generate a unique filename
-        file_extension = "jpg"
-        filename = f"reply_{user_id}_{int(datetime.now().timestamp())}.{file_extension}"
-        # Save the photo to a directory (you need to implement this)
-        # For example: media_url = await save_media_file(photo_file, filename)
-        media_url = f"media/replies/{filename}"  # This is just a placeholder
-
-        db = next(get_db())
-        
-        # دریافت اطلاعات پاسخ والد
-        parent_reply = db.query(CommentReply).filter(CommentReply.reply_id == UUID(reply_id)).first()
-        if not parent_reply:
-            await update.message.reply_text(
-                "پاسخ مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return ConversationHandler.END
-
-        # Create reply with media
-        reply = create_comment_reply(
-            db=db, 
-            comment_id=parent_reply.comment_id,
-            user_id=user_id, 
-            text=text, 
-            media_url=media_url,
-            parent_reply_id=UUID(reply_id)
-        )
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons()
-        )
-
-    except Exception as e:
-        # Log the error
-        logger.error(f"Error creating reply to reply with photo: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
-
-# Handle video replies to a reply
-async def handle_reply_to_reply_video(update: Update, context: CallbackContext) -> int:
-    """Handle video replies to a reply."""
-    user_id = update.effective_user.id
-    video = update.message.video
-    text = update.message.caption or ""
-
-    # Get reply ID from user data
-    reply_id = context.user_data.get("reply_to_reply_id")
-
-    if not reply_id:
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-        return ConversationHandler.END
-
-    # Check video size (10MB limit)
-    if video.file_size > 10 * 1024 * 1024:  # 10MB in bytes
-        await update.message.reply_text(
-            "حجم ویدیو بیشتر از 10 مگابایت است. لطفاً ویدیو کوچکتری ارسال کنید.",
-            reply_markup=create_cancel_button()
-        )
-        return REPLY
-
-    try:
-        # Get video file
-        video_file = await video.get_file()
-
-        # Generate a unique filename
-        file_extension = "mp4"
-        filename = f"reply_{user_id}_{int(datetime.now().timestamp())}.{file_extension}"
-        # Save the video to a directory (you need to implement this)
-        # For example: media_url = await save_media_file(video_file, filename)
-        media_url = f"media/replies/{filename}"  # This is just a placeholder
-
-        db = next(get_db())
-        
-        # دریافت اطلاعات پاسخ والد
-        parent_reply = db.query(CommentReply).filter(CommentReply.reply_id == UUID(reply_id)).first()
-        if not parent_reply:
-            await update.message.reply_text(
-                "پاسخ مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return ConversationHandler.END
-
-        # Create reply with media
-        reply = create_comment_reply(
-            db=db, 
-            comment_id=parent_reply.comment_id,
-            user_id=user_id, 
-            text=text, 
-            media_url=media_url,
-            parent_reply_id=UUID(reply_id)
-        )
-        success_message = "پاسخ شما با موفقیت ثبت شد و پس از تأیید نمایش داده خواهد شد."
-
-        # Send success message
-        await update.message.reply_text(
-            success_message,
-            reply_markup=create_main_menu_buttons()
-        )
-
-    except Exception as e:
-        # Log the error
-        logger.error(f"Error creating reply to reply with video: {e}")
-        await update.message.reply_text(
-            "خطا در پاسخ به نظر. لطفاً دوباره تلاش کنید.",
-            reply_markup=create_main_menu_buttons()
-        )
-
-    # End the conversation
-    return ConversationHandler.END
-
-# Cancel reply conversation handler
-async def cancel_reply_to_reply(update: Update, context: CallbackContext) -> int:
-    """Cancel reply conversation."""
-    await update.message.reply_text(
-        "پاسخ به نظر لغو شد.",
-        reply_markup=create_main_menu_buttons()
-    )
-    return ConversationHandler.END
-
-# Show replies to a reply callback handler
-async def show_replies_to_reply_callback(update: Update, context: CallbackContext) -> None:
-    """Handle showing replies to a reply."""
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # Extract reply ID and offset from callback data
-        _,_,_, reply_id = query.data.split("_", 3)
-        
-        # Get reply details
-        db = next(get_db())
-        parent_reply = db.query(CommentReply).filter(CommentReply.reply_id == UUID(reply_id)).first()
-        
-        if not parent_reply:
-            await query.edit_message_text(
-                "پاسخ مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return
-        
-        # Get approved replies for the reply
-        replies = get_reply_replies(db, UUID(reply_id), ContentStatus.APPROVED)
-        
-        # اگر پاسخی وجود نداشت
-        if not replies:
-            await query.edit_message_text(
-                "پاسخ بیشتری وجود ندارد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_comments")]
-                ])
-            )
-            return
-    
-        # ابتدا پیام اصلی را به‌روزرسانی می‌کنیم
-        parent_user = get_user(db, parent_reply.user_id)
-        parent_username = parent_user.username if parent_user and parent_user.username else f"کاربر {parent_reply.user_id}"
-        
-        await context.bot.send_message(
-            text = f"↩️ پاسخ‌های {parent_username}:\n\n{parent_reply.text}",
-            chat_id=update.effective_chat.id,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به نظرات", callback_data="back_to_comments")]
-            ])
-        )
-        
-        # نمایش هر پاسخ در یک پیام جداگانه (حداکثر ۵ پاسخ)
-        for i, reply in enumerate(replies[:5], 1):
-            user = get_user(db, reply.user_id)
-            username = user.username if user and user.username else f"کاربر {reply.user_id}"
-            # متن پاسخ
-            reply_text = f"↩️ پاسخ #{i}:\n\n"
-            reply_text += f"👤 {username}:\n{reply.text}\n"
-            
-            # اگر رسانه داشت
-            if reply.media_url:
-                reply_text += "\n🖼️ [دارای تصویر یا ویدیو]\n"
-            
-            # تعداد پاسخ‌های این پاسخ
-            nested_replies_count = len(get_reply_replies(db, reply.reply_id, ContentStatus.APPROVED))
-            if nested_replies_count > 0:
-                reply_text += f"\n↩️ {nested_replies_count} پاسخ\n"
-            
-            # دکمه‌های هر پاسخ
-            reply_keyboard = create_reply_to_reply_buttons(str(reply.reply_id), has_replies=bool(nested_replies_count))
-            
-            # ارسال پیام پاسخ
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=reply_text,
-                reply_markup=reply_keyboard
-            )
-        
-        # پیام نهایی با دکمه‌های اصلی
-        final_keyboard = []
-        
-        if len(replies) > 5:
-            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {len(replies) - 5} پاسخ دیگر", callback_data=f"show_more_replies_{reply_id}_5")])
-        
-        # دکمه‌های اصلی
-        final_keyboard.append([InlineKeyboardButton("💬 افزودن پاسخ", callback_data=f"reply_to_reply_{reply_id}")])
-        final_keyboard.append([InlineKeyboardButton("🔙 بازگشت به نظرات", callback_data="back_to_comments")])
-        
-        # ارسال پیام نهایی
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="برای ادامه یکی از گزینه‌های زیر را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(final_keyboard)
-        )
-        
-    except Exception as e:
-        # Handle any other exceptions
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in show_replies_to_reply_callback: {str(e)}")
-        logger.exception("Full traceback:")
-        await query.edit_message_text(
-            f"خطایی رخ داد. لطفاً دوباره تلاش کنید.\n{e}",
-            reply_markup=create_main_menu_buttons()
+            text=reply_display_text,
+            reply_markup=InlineKeyboardMarkup(buttons_for_this_reply_row) if buttons_for_this_reply_row else None,
+            # Consider sending media if reply.media_url and it's a photo/video:
+            # if reply.media_url and is_photo(reply.media_url): await context.bot.send_photo(...)
         )
 
-async def create_reply_to_reply_buttons(reply_id: str, has_replies: bool = False) -> InlineKeyboardMarkup:
-    """Create buttons for replying to a reply."""
-    buttons = []
-    
-    # دکمه پاسخ به این پاسخ
-    buttons.append([InlineKeyboardButton("↩️ پاسخ به این پاسخ", callback_data=f"reply_to_reply_{reply_id}")])
-    
-    # اگر پاسخ‌هایی وجود داشت، دکمه نمایش پاسخ‌ها را اضافه می‌کنیم
-    if has_replies:
-        buttons.append([InlineKeyboardButton("👁️ مشاهده پاسخ‌ها", callback_data=f"show_replies_to_reply_{reply_id}")])
-    
-    # دکمه بازگشت
-    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_comments")])
-    
-    return InlineKeyboardMarkup(buttons)
-
-# Show more replies to a reply callback handler
-async def show_more_replies_callback(update: Update, context: CallbackContext) -> None:
-    """Handle showing more replies to a reply."""
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        # Extract reply ID and offset from callback data
-        _,_,_, reply_id, offset = query.data.split("_", 4)
-        offset = int(offset)
-        
-        # Get reply details
-        db = next(get_db())
-        parent_reply = db.query(CommentReply).filter(CommentReply.reply_id == UUID(reply_id)).first()
-        
-        if not parent_reply:
-            await query.edit_message_text(
-                "پاسخ مورد نظر یافت نشد. لطفاً دوباره تلاش کنید.",
-                reply_markup=create_main_menu_buttons()
-            )
-            return
-        
-        # Get approved replies for the reply
-        replies = get_reply_replies(db, UUID(reply_id), ContentStatus.APPROVED)
-        
-        # اگر پاسخی وجود نداشت یا آفست بیشتر از تعداد پاسخ‌ها بود
-        if not replies or offset >= len(replies):
-            await query.edit_message_text(
-                "پاسخ بیشتری وجود ندارد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_comments")]
-                ])
-            )
-            return
-        
-        # تعداد پاسخ‌های باقیمانده
-        remaining_replies = replies[offset:]
-        
-        # تعداد پاسخ‌هایی که نمایش داده می‌شوند (حداکثر ۵ پاسخ)
-        display_count = min(5, len(remaining_replies))
-        
-        # ابتدا پیام اصلی را به‌روزرسانی می‌کنیم
-        parent_user = get_user(db, parent_reply.user_id)
-        parent_username = parent_user.username if parent_user and parent_user.username else f"کاربر {parent_reply.user_id}"
-        
-        await query.edit_message_text(
-            f"↩️ پاسخ‌های بیشتر به {parent_username}:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت به نظرات", callback_data="back_to_comments")]
-            ])
+    # Pagination and Global Actions
+    final_buttons_layout = []
+    pagination_row = []
+    if offset > 0:
+        pagination_row.append(
+            InlineKeyboardButton("صفحه قبل", callback_data=f"show_replies_ROOT_{parent_id_str}_{max(0, offset - limit)}")
         )
-        
-        # نمایش هر پاسخ در یک پیام جداگانه
-        for i, reply in enumerate(remaining_replies[:display_count], offset + 1):
-            user = get_user(db, reply.user_id)
-            username = user.username if user and user.username else f"کاربر {reply.user_id}"
-            
-            # متن پاسخ
-            reply_text = f"↩️ پاسخ #{i}:\n\n"
-            reply_text += f"👤 {username}:\n{reply.text}\n"
-            
-            # اگر رسانه داشت
-            if reply.media_url:
-                reply_text += "\n🖼️ [دارای تصویر یا ویدیو]\n"
-            
-            # تعداد پاسخ‌های این پاسخ
-            nested_replies_count = len(get_reply_replies(db, reply.reply_id, ContentStatus.APPROVED))
-            if nested_replies_count > 0:
-                reply_text += f"\n↩️ {nested_replies_count} پاسخ\n"
-            
-            # دکمه‌های هر پاسخ
-            reply_keyboard = create_reply_to_reply_buttons(str(reply.reply_id), has_replies=bool(nested_replies_count))
-            
-            # ارسال پیام پاسخ
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=reply_text,
-                reply_markup=reply_keyboard
-            )
-        
-        # پیام نهایی با دکمه‌های اصلی
-        final_keyboard = []
-        
-        # اگر پاسخ‌های بیشتری باقی مانده بود
-        new_offset = offset + display_count
-        if new_offset < len(replies):
-            final_keyboard.append([InlineKeyboardButton(f"👁️ نمایش {len(replies) - new_offset} پاسخ دیگر", callback_data=f"show_more_replies_{reply_id}_{new_offset}")])
-        
-        # دکمه‌های اصلی
-        final_keyboard.append([InlineKeyboardButton("💬 افزودن پاسخ", callback_data=f"reply_to_reply_{reply_id}")])
-        final_keyboard.append([InlineKeyboardButton("🔙 بازگشت به نظرات", callback_data="back_to_comments")])
-        
-        # ارسال پیام نهایی
+    if offset + len(current_replies_list) < total_at_this_level:
+        pagination_row.append(
+            InlineKeyboardButton("صفحه بعد", callback_data=f"show_replies_ROOT_{parent_id_str}_{offset + limit}")
+        )
+    if pagination_row:
+        final_buttons_layout.append(pagination_row)
+
+    # Button to add a new reply at the *current viewing level*
+    if parent_id_str == "ROOT":
+        final_buttons_layout.append([InlineKeyboardButton("💬 افزودن پاسخ به نظر اصلی", callback_data=f"reply_comment_{root_comment_id_str}")])
+    else: # We are viewing sub-replies of parent_id_str
+        final_buttons_layout.append([InlineKeyboardButton(f"💬 افزودن پاسخ به این سطح", callback_data=f"rtr_{root_comment_id_str}_{parent_id_str}")])
+
+    # Back button logic needs to be robust.
+    # If viewing sub-replies (parent_id_str is a UUID), "Back" should go to the parent of these sub-replies.
+    # This means finding the parent of parent_id_str or going to ROOT.
+    if parent_id_str != "ROOT":
+        current_parent_reply = db.execute(select(CommentReply.parent_reply_id, CommentReply.comment_id).where(CommentReply.reply_id == UUID(parent_id_str))).first()
+        if current_parent_reply:
+            grandparent_reply_id = current_parent_reply.parent_reply_id
+            actual_root_comment_id = current_parent_reply.comment_id # Should match root_comment_id_str
+            if grandparent_reply_id: # Go to grandparent's replies
+                 final_buttons_layout.append([InlineKeyboardButton("🔙 بازگشت به سطح بالاتر", callback_data=f"show_replies_{str(actual_root_comment_id)}_{str(grandparent_reply_id)}_0")])
+            else: # Parent was a direct reply to comment, so back to root replies
+                 final_buttons_layout.append([InlineKeyboardButton("🔙 بازگشت به پاسخ های نظر اصلی", callback_data=f"show_replies_{str(actual_root_comment_id)}_ROOT_0")])
+    else:
+        # We are at replies for the main comment. "Back" could go to the list of comments for the item.
+        # This depends on your overall bot structure.
+        # Example: final_buttons_layout.append([InlineKeyboardButton("🔙 بازگشت به لیست نظرات", callback_data=f"view_item_comments_{ITEM_ID_HERE}")])
+        pass # Add appropriate "back to main comments list" or "back to item" button if needed
+
+    if final_buttons_layout:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="برای ادامه یکی از گزینه‌های زیر را انتخاب کنید:",
-            reply_markup=InlineKeyboardMarkup(final_keyboard)
-        )
-        
-    except Exception as e:
-        # Handle any other exceptions
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in show_more_replies_callback: {str(e)}")
-        logger.exception("Full traceback:")
-        await query.edit_message_text(
-            f"خطایی رخ داد. لطفاً دوباره تلاش کنید.\n{e}",
-            reply_markup=create_main_menu_buttons()
+            text="گزینه‌ها:",
+            reply_markup=InlineKeyboardMarkup(final_buttons_layout)
         )
 ############################################
 
@@ -1630,7 +1043,7 @@ async def add_item_callback(update: Update, context: CallbackContext) -> int:
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("لغو", callback_data="cancel")]])
     )
     
-    return COMMENT  # استفاده از حالت COMMENT برای دریافت نام محصول
+    return NAME  # استفاده از حالت COMMENT برای دریافت نام محصول
 
 # هندلر برای دریافت نام محصول جدید
 async def add_item_name(update: Update, context: CallbackContext) -> int:
@@ -1653,7 +1066,7 @@ async def add_item_name(update: Update, context: CallbackContext) -> int:
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("لغو", callback_data="cancel")]])
     )
     
-    return REPLY  # استفاده از حالت REPLY برای دریافت توضیحات محصول
+    return DESCRIPTION  # استفاده از حالت REPLY برای دریافت توضیحات محصول
 
 # هندلر برای دریافت توضیحات محصول جدید
 async def add_item_description(update: Update, context: CallbackContext) -> int:
@@ -1792,16 +1205,17 @@ def register_item_callback_handlers(application):
     application.add_handler(CallbackQueryHandler(liquid_category_callback, pattern="^liquid_(salt|juice)$"))
     application.add_handler(CallbackQueryHandler(page_callback, pattern="^page_"))
     application.add_handler(CallbackQueryHandler(item_detail_callback, pattern="^item_"))
-    application.add_handler(CallbackQueryHandler(show_replies_callback, pattern="^show_replies_"))
+    application.add_handler(CallbackQueryHandler(show_replies_or_sub_replies_callback, pattern="^show_replies_"))
     
     # اضافه کردن هندلر مکالمه برای افزودن آیتم
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_item_callback, pattern="^add_item_")],
         states={
-            COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_name)],
-            REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_description)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_name)],
+            DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_item_description)],
         },
         fallbacks=[CallbackQueryHandler(cancel_callback, pattern="^cancel$")],
+        per_message=False
 
     )
     application.add_handler(conv_handler)
@@ -1820,44 +1234,31 @@ def register_item_callback_handlers(application):
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_callback, pattern="^cancel$")],
+        per_message=False
     )
     
     application.add_handler(comment_conv_handler)
     application.add_handler(CallbackQueryHandler(more_comments_callback, pattern="^more_comments_"))
     application.add_handler(CallbackQueryHandler(item_comments_callback, pattern="^comments_"))
-    application.add_handler(CallbackQueryHandler(view_comment_callback, pattern="^viewcomment_"))
-    application.add_handler(CallbackQueryHandler(more_comments_callback, pattern="^more_comments_"))
     #
     comment_reply_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(reply_comment_callback, pattern="^reply_comment_")],
+        entry_points=[CallbackQueryHandler(reply_comment_callback, pattern="^reply_comment_"),
+                      CallbackQueryHandler(init_reply_to_reply_callback, pattern=r"^rtr_")],
         states={
             REPLY: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply_text),
                 MessageHandler(filters.PHOTO, handle_reply_photo),
                 MessageHandler(filters.VIDEO, handle_reply_video),
-                CallbackQueryHandler(cancel_reply, pattern="^cancel$")
+                CallbackQueryHandler(cancel_reply_conversation, pattern=r"^cancel_reply_conversation$"),
             ],
         },
-        fallbacks=[CallbackQueryHandler(cancel_reply, pattern="^cancel$")],
-
+        fallbacks=[CommandHandler("cancel", cancel_reply_conversation),
+                   CallbackQueryHandler(cancel_reply_conversation, pattern=r"^cancel_reply_conversation$"),],
+        allow_reentry=True,
+        per_message=False
     )
     application.add_handler(comment_reply_conv_handler)
     #
-    reply_to_reply_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(reply_to_reply_callback,pattern="^reply_to_reply_")],
-        states={
-        REPLY:[
-            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reply_to_reply_text),
-            MessageHandler(filters.PHOTO, handle_reply_to_reply_photo),
-            MessageHandler(filters.VIDEO, handle_reply_to_reply_video),
-            CallbackQueryHandler(cancel_reply_to_reply, pattern="^cancel$")
-        ],
-        },
-        fallbacks=[CallbackQueryHandler(cancel_reply_to_reply, pattern="^cancel$")],
 
-    )
-    application.add_handler(reply_to_reply_conv_handler)
-    application.add_handler(CallbackQueryHandler(show_replies_to_reply_callback,pattern="^replies_to_reply_"))
-    
     
     

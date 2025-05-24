@@ -1,6 +1,9 @@
+from unicodedata import category
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from typing import List, Dict, Any, Optional
-
+from database.db_operations import count_direct_replies_to_comment ,count_sub_replies
+from database.db_handler import get_db
+from uuid import UUID
 
 def create_device_category_buttons() -> InlineKeyboardMarkup:
     """Create device category buttons."""
@@ -88,17 +91,6 @@ def create_comment_buttons(comment_id: str, has_replies: bool = False) -> Inline
     ]
     
     if has_replies:
-        keyboard.append([InlineKeyboardButton("👁️ نمایش پاسخ‌ها", callback_data=f"show_replies_{comment_id}")])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-def create_reply_comment_buttons(comment_id: str, has_replies: bool = False) -> InlineKeyboardMarkup:
-    """Create buttons for comment interaction."""
-    keyboard = [
-        [InlineKeyboardButton("💬 پاسخ به این نظر", callback_data=f"reply_to_reply_{comment_id}")]
-    ]
-    
-    if has_replies:
-        keyboard.append([InlineKeyboardButton("👁️ نمایش پاسخ‌ها", callback_data=f"replies_to_reply_{comment_id}")])
+        keyboard.append([InlineKeyboardButton("👁️ نمایش پاسخ‌ها", callback_data=f"show_replies_{comment_id}_ROOT_0")])
     
     return InlineKeyboardMarkup(keyboard)

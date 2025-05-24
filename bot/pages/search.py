@@ -103,8 +103,19 @@ async def search_cancel_callback(update: Update, context: CallbackContext) -> in
 # Register search callback handlers
 def register_search_callback_handlers(application: Application) -> None:
     """Register search callback handlers."""
-    application.add_handler(CallbackQueryHandler(search_callback, pattern='^search$'))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_message))
-    application.add_handler(CallbackQueryHandler(search_cancel_callback, pattern='^cancel$'))
+    search_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(search_callback, pattern='^search$')],
+        states={
+            SEARCH: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, search_message),
+            ]
+        },
+        fallbacks=[
+            CallbackQueryHandler(search_cancel_callback, pattern='^cancel$'),
+            CallbackQueryHandler(cancel_callback, pattern='^main_menu$')
+        ],
+        per_message=False
+    )
+    application.add_handler(search_conv_handler)
     
 

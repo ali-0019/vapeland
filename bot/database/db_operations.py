@@ -74,26 +74,23 @@ def create_item(db: Session, type: ItemType, name: str, description: str = None)
     db.refresh(item)
     return item
 
-def get_items_by_type(db: Session, type: ItemType, limit: int = 10, offset: int = 0) -> List[Item]:
+def get_items_by_type(db: Session, type: ItemType) -> List[Item]:
     """Retrieve items by type with pagination."""
     items = db.execute(
         select(Item)
         .filter_by(type=type)
         .order_by(Item.average_rating.desc())
-        .limit(limit)
-        .offset(offset)
+
     ).scalars().all()
     
     return items  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
 
-def search_items(db: Session, query: str, limit: int = 10, offset: int = 0) -> List[Item]:
+def search_items(db: Session, query: str) -> List[Item]:
     """Search items by name."""
     items = db.execute(
         select(Item)
         .filter(Item.name.ilike(f"%{query}%"))
         .order_by(Item.average_rating.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return items  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
@@ -114,21 +111,23 @@ def get_items(db: Session) -> List[Item]:
 ###################################
 def create_comment(db: Session, item_id: UUID, user_id: int, text: str, media_url: str = None) -> Comment:
     """Create a new comment with pending status."""
-    comment = Comment(item_id=item_id, user_id=user_id, text=text, media_url=media_url, status=ContentStatus.APPROVED)
+    comment = Comment(item_id=item_id, 
+                      user_id=user_id,
+                      text=text,
+                      media_url=media_url, 
+                      status=ContentStatus.APPROVED)
     db.add(comment)
     update_user_rank_score(db, user_id, 5)  # Add 5 points for commenting
     db.commit()
     db.refresh(comment)
     return comment
 
-def get_comments_by_item(db: Session, item_id: UUID, status: ContentStatus = ContentStatus.APPROVED, limit: int = 5, offset: int = 0) -> List[Comment]:
+def get_comments_by_item(db: Session, item_id: UUID, status: ContentStatus = ContentStatus.APPROVED) -> List[Comment]:
     """Retrieve approved comments for an item, sorted by creation date."""
     comments = db.execute(
         select(Comment)
         .filter_by(item_id=item_id, status=status)
         .order_by(Comment.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return comments  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
@@ -140,7 +139,7 @@ def create_comment_reply(
     user_id: int, 
     text: str, 
     media_url: str = None, 
-    parent_reply_id: UUID = None  # برای پشتیبانی از reply to reply
+    parent_reply_id: UUID | None = None  # برای پشتیبانی از reply to reply
 ) -> CommentReply:
     new_reply = CommentReply(
         comment_id=comment_id,
@@ -151,6 +150,7 @@ def create_comment_reply(
         status=ContentStatus.APPROVED
     )
     db.add(new_reply)
+    update_user_rank_score(db, user_id, 5) 
     db.commit()
     db.refresh(new_reply)
     return new_reply
@@ -160,31 +160,57 @@ def get_comment_replies(
     db: Session, 
     comment_id: UUID, 
     status: ContentStatus = ContentStatus.APPROVED, 
-    limit: int = 5, 
-    offset: int = 0
 ) -> List[CommentReply]:
-    replies = db.query(CommentReply).filter(
-        CommentReply.comment_id == comment_id,
-        CommentReply.status == status,
-        CommentReply.parent_reply_id == None  # فقط پاسخ‌های سطح اول
-    ).order_by(CommentReply.created_at.asc()).offset(offset).limit(limit).all()
-    
-    return replies
+    replies = (
+        select(CommentReply)
+        .where(
+            CommentReply.comment_id == comment_id,
+            CommentReply.status == status,
+            CommentReply.parent_reply_id == None  # فقط پاسخ‌های سطح اول به کامنت اصلی
+        )
+        .order_by(CommentReply.created_at.asc()) # مرتب‌سازی از قدیمی به جدید
+    )
+    replies = db.execute(replies).scalars().all()
+    return list(replies)
 
 # تابع جدید برای دریافت پاسخ‌های یک پاسخ
 def get_reply_replies(
     db: Session, 
     reply_id: UUID, 
     status: ContentStatus = ContentStatus.APPROVED, 
-    limit: int = 5, 
-    offset: int = 0
 ) -> List[CommentReply]:
-    replies = db.query(CommentReply).filter(
-        CommentReply.parent_reply_id == reply_id,
-        CommentReply.status == status
-    ).order_by(CommentReply.created_at.asc()).offset(offset).limit(limit).all()
-    
-    return replies
+    replies = (
+        select(CommentReply)
+        .where(
+            CommentReply.parent_reply_id == reply_id, # پاسخ‌هایی که والدشان این reply_id است
+            CommentReply.status == status
+        )
+        .order_by(CommentReply.created_at.asc()) # مرتب‌سازی از قدیمی به جدید
+
+    )
+    replies = db.execute(replies).scalars().all()
+    return list(replies)
+
+def count_direct_replies_to_comment(db: Session, comment_id: UUID, status: ContentStatus = ContentStatus.APPROVED) -> int:
+    """Counts direct replies to a main comment."""
+    return db.execute(
+        select(func.count(CommentReply.reply_id))
+        .where(
+            CommentReply.comment_id == comment_id,
+            CommentReply.parent_reply_id.is_(None), # Direct replies
+            CommentReply.status == status
+        )
+    ).scalar_one()
+
+def count_sub_replies(db: Session, parent_reply_id: UUID, status: ContentStatus = ContentStatus.APPROVED) -> int:
+    """Counts direct sub-replies to a given reply."""
+    return db.execute(
+        select(func.count(CommentReply.reply_id))
+        .where(
+            CommentReply.parent_reply_id == parent_reply_id,
+            CommentReply.status == status
+        )
+    ).scalar_one()
 
 
 ##########################################
@@ -199,14 +225,12 @@ def create_tech_question(db: Session, user_id: int, text: str, media_url: str = 
     db.refresh(question)
     return question
 
-def get_top_tech_questions(db: Session, limit: int = 10, offset: int = 0) -> List[TechQuestion]:
+def get_top_tech_questions(db: Session) -> List[TechQuestion]:
     """Retrieve top 10 approved technical questions by average rating."""
     questions = db.execute(
         select(TechQuestion)
         .filter_by(status=ContentStatus.APPROVED)
         .order_by(TechQuestion.average_rating.desc(), TechQuestion.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return questions  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
@@ -225,14 +249,12 @@ def create_question_reply(db: Session, question_id: UUID, user_id: int, text: st
     db.refresh(reply)
     return reply
 
-def get_question_replies(db: Session, question_id: UUID, status: ContentStatus = ContentStatus.APPROVED, limit: int = 5, offset: int = 0) -> List[QuestionReply]:
+def get_question_replies(db: Session, question_id: UUID, status: ContentStatus = ContentStatus.APPROVED) -> List[QuestionReply]:
     """Retrieve approved replies for a technical question, sorted by creation date."""
     replies = db.execute(
         select(QuestionReply)
         .filter_by(question_id=question_id, status=status)
         .order_by(QuestionReply.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return replies  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
@@ -312,14 +334,12 @@ def create_product_suggestion(db: Session, user_id: int, name: str, description:
     db.refresh(suggestion)
     return suggestion
 
-def get_product_suggestions(db: Session, status: ContentStatus = ContentStatus.PENDING, limit: int = 10, offset: int = 0) -> List[ProductSuggestion]:
+def get_product_suggestions(db: Session, status: ContentStatus = ContentStatus.PENDING) -> List[ProductSuggestion]:
     """Retrieve product suggestions by status with pagination."""
     suggestions = db.execute(
         select(ProductSuggestion)
         .filter_by(status=status)
         .order_by(ProductSuggestion.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return suggestions  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند
@@ -336,14 +356,12 @@ def create_contact_message(db: Session, user_id: int, text: str, media_url: str 
     db.refresh(message)
     return message
 
-def get_contact_messages(db: Session, status: MessageStatus = MessageStatus.PENDING, limit: int = 10, offset: int = 0) -> List[ContactMessage]:
+def get_contact_messages(db: Session, status: MessageStatus = MessageStatus.PENDING) -> List[ContactMessage]:
     """Retrieve contact messages by status with pagination."""
     messages = db.execute(
         select(ContactMessage)
         .filter_by(status=status)
         .order_by(ContactMessage.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     ).scalars().all()
     
     return messages  # اگر لیست خالی باشد، یک لیست خالی برمی‌گرداند

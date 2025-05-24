@@ -194,6 +194,7 @@ def register_username_handlers(application):
             ],
         },
         fallbacks=[CallbackQueryHandler(cancel_username, pattern="cancel_username")],
+        per_message=False
     )
     
     application.add_handler(username_conv_handler)

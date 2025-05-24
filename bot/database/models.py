@@ -6,7 +6,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import UUID, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from enum import Enum as PyEnum
-
+from sqlalchemy import func
 # کلاس پایه برای مدل‌های SQLAlchemy
 # این کلاس به عنوان کلاس پایه برای تمام مدل‌های دیگر استفاده می‌شود
 class Base(DeclarativeBase):
@@ -143,14 +143,17 @@ class CommentReply(Base):
     user: Mapped["User"] = relationship(back_populates="comment_replies")
 
     parent_reply: Mapped["CommentReply | None"] = relationship(
+        "CommentReply", # نام کلاس به صورت رشته
         back_populates="child_replies",
-        remote_side="CommentReply.reply_id",
-        foreign_keys=[parent_reply_id]
+        remote_side=[reply_id], # ارجاع به صفت reply_id همین کلاس
+        foreign_keys=[parent_reply_id] # ارجاع به صفت parent_reply_id همین کلاس
     )
     
     child_replies: Mapped[list["CommentReply"]] = relationship(
+        "CommentReply", # نام کلاس به صورت رشته
         back_populates="parent_reply",
-        cascade="all, delete-orphan"
+        cascade="all, delete-orphan",
+        foreign_keys=[parent_reply_id] # ارجاع به صفت parent_reply_id همین کلاس
     )
 
  
